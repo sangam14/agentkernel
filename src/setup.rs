@@ -14,6 +14,7 @@ use crate::plugin_installer;
 /// Existing user-provided binaries and kernel images are detected before these
 /// defaults are used, so upgrading AgentKernel does not replace explicit picks.
 pub const DEFAULT_FIRECRACKER_VERSION: &str = "v1.16.1";
+pub const DEFAULT_CLOUD_HYPERVISOR_VERSION: &str = "v53.0";
 pub const DEFAULT_KERNEL_VERSION: &str = "6.18.45";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +52,42 @@ fn firecracker_download_url(release: FirecrackerRelease) -> String {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CloudHypervisorRelease {
+    arch: &'static str,
+    sha256: &'static str,
+}
+
+fn cloud_hypervisor_release(arch: &str) -> Result<CloudHypervisorRelease> {
+    match arch {
+        "x86_64" => Ok(CloudHypervisorRelease {
+            arch: "x86_64",
+            sha256: "448af3d4e59b22c2987f7df94c213ad40fb53a10d437e42b5ee6c4fce7c29ecc",
+        }),
+        "aarch64" => Ok(CloudHypervisorRelease {
+            arch: "aarch64",
+            sha256: "f192b510eea1c710cbc439d716bb0573c223fc463dbe3e6523788a2b7ef62850",
+        }),
+        other => bail!("Unsupported Cloud Hypervisor architecture: {other}"),
+    }
+}
+
+fn cloud_hypervisor_asset_name(release: CloudHypervisorRelease) -> String {
+    if release.arch == "x86_64" {
+        "cloud-hypervisor-static".to_string()
+    } else {
+        "cloud-hypervisor-static-aarch64".to_string()
+    }
+}
+
+fn cloud_hypervisor_download_url(release: CloudHypervisorRelease) -> String {
+    format!(
+        "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/{}/{}",
+        DEFAULT_CLOUD_HYPERVISOR_VERSION,
+        cloud_hypervisor_asset_name(release)
+    )
+}
+
 /// Runtime options for rootfs
 pub const RUNTIMES: &[(&str, &str)] = &[
     ("base", "Minimal Alpine Linux (~64MB)"),
@@ -67,6 +104,7 @@ pub struct SetupConfig {
     pub kernel_version: String,
     pub runtimes: Vec<String>,
     pub install_firecracker: bool,
+    pub install_cloud_hypervisor: bool,
 }
 
 impl Default for SetupConfig {
@@ -76,6 +114,7 @@ impl Default for SetupConfig {
             kernel_version: DEFAULT_KERNEL_VERSION.to_string(),
             runtimes: vec!["base".to_string()],
             install_firecracker: true,
+            install_cloud_hypervisor: true,
         }
     }
 }
@@ -105,6 +144,7 @@ pub fn check_installation() -> SetupStatus {
         rootfs_python_installed: data_dir.join("images/rootfs/python.ext4").exists(),
         rootfs_node_installed: data_dir.join("images/rootfs/node.ext4").exists(),
         firecracker_installed: find_firecracker().is_some(),
+        cloud_hypervisor_installed: find_cloud_hypervisor().is_some(),
         kvm_available: kvm_accessible,
         kvm_permission_denied,
         docker_available: check_docker(),
@@ -122,6 +162,7 @@ pub struct SetupStatus {
     pub rootfs_python_installed: bool,
     pub rootfs_node_installed: bool,
     pub firecracker_installed: bool,
+    pub cloud_hypervisor_installed: bool,
     pub kvm_available: bool,
     /// True if /dev/kvm exists but user lacks permission to access it
     pub kvm_permission_denied: bool,
@@ -134,16 +175,16 @@ pub struct SetupStatus {
 
 impl SetupStatus {
     pub fn is_ready(&self) -> bool {
-        // For Firecracker backend, we need kernel + rootfs
-        let firecracker_ready =
+        // For Firecracker/CH backend, we need kernel + rootfs
+        let vmm_ready =
             self.kvm_available && self.kernel_installed && self.rootfs_base_installed;
 
         // For container backends (Docker/Apple), just need the backend available
         let container_ready = self.docker_available || self.apple_containers_available;
 
-        // If KVM is available, require Firecracker assets (daemon will use them)
+        // If KVM is available, require VMM assets
         if self.kvm_available {
-            return firecracker_ready;
+            return vmm_ready;
         }
 
         container_ready
@@ -170,6 +211,14 @@ impl SetupStatus {
         println!(
             "  Firecracker: {}",
             if self.firecracker_installed {
+                "installed"
+            } else {
+                "not installed"
+            }
+        );
+        println!(
+            "  Cloud Hypervisor: {}",
+            if self.cloud_hypervisor_installed {
                 "installed"
             } else {
                 "not installed"
@@ -235,6 +284,16 @@ fn find_kernel(data_dir: &Path) -> Option<PathBuf> {
                 return Some(entry.path());
             }
         }
+    }
+    None
+}
+
+/// Find Cloud Hypervisor binary
+fn find_cloud_hypervisor() -> Option<PathBuf> {
+    let data_dir = default_data_dir();
+    let local_ch = data_dir.join("bin/cloud-hypervisor");
+    if local_ch.exists() {
+        return Some(local_ch);
     }
     None
 }
@@ -482,6 +541,7 @@ pub async fn run_setup(non_interactive: bool) -> Result<()> {
     // Determine what to install
     let mut install_kernel = !status.kernel_installed;
     let mut install_firecracker = !status.firecracker_installed;
+    let mut install_cloud_hypervisor = !status.cloud_hypervisor_installed;
     let mut runtimes_to_install: Vec<String> = Vec::new();
 
     if non_interactive {
@@ -497,6 +557,10 @@ pub async fn run_setup(non_interactive: bool) -> Result<()> {
 
         if !status.firecracker_installed {
             install_firecracker = prompt_yes_no("Download and install Firecracker?", true)?;
+        }
+
+        if !status.cloud_hypervisor_installed {
+            install_cloud_hypervisor = prompt_yes_no("Download and install Cloud Hypervisor?", true)?;
         }
 
         // Ask which runtimes to install
@@ -518,14 +582,23 @@ pub async fn run_setup(non_interactive: bool) -> Result<()> {
         }
     }
 
-    // Create directories
-    std::fs::create_dir_all(data_dir.join("images/kernel"))?;
-    std::fs::create_dir_all(data_dir.join("images/rootfs"))?;
-    std::fs::create_dir_all(data_dir.join("bin"))?;
+    if status.is_ready()
+        && !install_kernel
+        && !install_firecracker
+        && !install_cloud_hypervisor
+        && runtimes_to_install.is_empty()
+    {
+        println!("Agentkernel is already set up and ready to use!\n");
+    } else {
+        // Create directories
+        std::fs::create_dir_all(data_dir.join("images/kernel"))?;
+        std::fs::create_dir_all(data_dir.join("images/rootfs"))?;
+        std::fs::create_dir_all(data_dir.join("bin"))?;
 
-    // Check for Docker (needed for building)
-    if (install_kernel || !runtimes_to_install.is_empty()) && !status.docker_available {
-        bail!("Docker is required to build kernel and rootfs images. Please install Docker first.");
+        // Check for Docker (needed for building)
+        if (install_kernel || !runtimes_to_install.is_empty()) && !status.docker_available {
+            bail!("Docker is required to build kernel and rootfs images. Please install Docker first.");
+        }
     }
 
     // Install kernel
@@ -544,6 +617,12 @@ pub async fn run_setup(non_interactive: bool) -> Result<()> {
     if install_firecracker {
         println!("\n==> Installing Firecracker...");
         install_firecracker_binary(&data_dir).await?;
+    }
+
+    // Install Cloud Hypervisor
+    if install_cloud_hypervisor {
+        println!("\n==> Installing Cloud Hypervisor...");
+        install_cloud_hypervisor_binary(&data_dir).await?;
     }
 
     // Pre-pull Docker images for faster container startup
@@ -1259,6 +1338,66 @@ async fn install_firecracker_binary(data_dir: &Path) -> Result<()> {
     println!("\nAdd to your PATH:");
     println!("  export PATH=\"{}:$PATH\"", bin_dir.display());
 
+    Ok(())
+}
+
+/// Install Cloud Hypervisor binary
+async fn install_cloud_hypervisor_binary(data_dir: &Path) -> Result<()> {
+    let bin_dir = data_dir.join("bin");
+    std::fs::create_dir_all(&bin_dir)?;
+
+    let arch = if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        bail!("Unsupported architecture");
+    };
+
+    let release = cloud_hypervisor_release(arch)?;
+    let url = cloud_hypervisor_download_url(release);
+
+    println!(
+        "Downloading Cloud Hypervisor {} for {}...",
+        DEFAULT_CLOUD_HYPERVISOR_VERSION, arch
+    );
+
+    let temp_dir = tempfile::tempdir().context("Failed to create Cloud Hypervisor download directory")?;
+    let binary_path = temp_dir.path().join("cloud-hypervisor");
+
+    let status = Command::new("curl")
+        .args(["-fsSL", "--output"])
+        .arg(&binary_path)
+        .arg(&url)
+        .status()
+        .context("Failed to download Cloud Hypervisor")?;
+
+    if !status.success() {
+        bail!("Failed to download Cloud Hypervisor");
+    }
+
+    let binary = std::fs::read(&binary_path).context("Failed to read Cloud Hypervisor binary")?;
+    let actual_sha256 = hex::encode(Sha256::digest(&binary));
+    if actual_sha256 != release.sha256 {
+        bail!(
+            "Cloud Hypervisor binary checksum mismatch: expected {}, got {}",
+            release.sha256,
+            actual_sha256
+        );
+    }
+
+    let target_path = bin_dir.join("cloud-hypervisor");
+    std::fs::copy(&binary_path, &target_path).with_context(|| {
+        format!("Failed to install Cloud Hypervisor binary from {}", binary_path.display())
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target_path, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    println!("Cloud Hypervisor installed to: {}", target_path.display());
     Ok(())
 }
 

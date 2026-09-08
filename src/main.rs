@@ -18,6 +18,7 @@ mod devcontainer;
 mod docker_backend;
 mod durable_storage;
 mod events;
+mod cloud_hypervisor_client;
 mod firecracker_client;
 mod full_state;
 mod git_utils;
