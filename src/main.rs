@@ -139,7 +139,7 @@ enum Commands {
         /// Use container pool for faster execution (skips create/destroy overhead)
         #[arg(short = 'F', long)]
         fast: bool,
-        /// Backend to use: docker, podman, firecracker, apple, hyperlight, kubernetes, nomad, daytona, runloop, e2b, modal, agentcomputer (default: auto-detect)
+        /// Backend to use: docker, podman, firecracker, apple, hyperlight, cloudhypervisor, kubernetes, nomad, daytona, runloop, e2b, modal, agentcomputer (default: auto-detect)
         #[arg(short = 'B', long)]
         backend: Option<String>,
         /// Template to use (built-in name, local name, github:owner/repo/path, or file path)
@@ -508,7 +508,7 @@ enum SandboxAction {
         /// Create an AgentKernel-managed Git worktree for the mounted project
         #[arg(long)]
         git_worktree: bool,
-        /// Backend to use: docker, podman, firecracker, apple, hyperlight, kubernetes, nomad, daytona, runloop, e2b, modal, agentcomputer (default: auto-detect)
+        /// Backend to use: docker, podman, firecracker, apple, hyperlight, cloudhypervisor, kubernetes, nomad, daytona, runloop, e2b, modal, agentcomputer (default: auto-detect)
         #[arg(short = 'B', long)]
         backend: Option<String>,
         /// Template to use (built-in name, local name, github:owner/repo/path, or file path)
@@ -570,7 +570,7 @@ enum SandboxAction {
     Start {
         /// Name of the sandbox to start
         name: String,
-        /// Backend to use: docker, podman, firecracker, apple, hyperlight, kubernetes, nomad, daytona, runloop, e2b, modal, agentcomputer (default: auto-detect)
+        /// Backend to use: docker, podman, firecracker, apple, hyperlight, cloudhypervisor, kubernetes, nomad, daytona, runloop, e2b, modal, agentcomputer (default: auto-detect)
         #[arg(short = 'B', long)]
         backend: Option<String>,
     },
