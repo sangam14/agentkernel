@@ -175,12 +175,13 @@ impl Sandbox for CloudHypervisorSandbox {
         let _ = fs::remove_file(&self.vsock_path);
 
         // Spawn Cloud Hypervisor
+        let log_file = std::fs::File::create("/tmp/ch_error.log").unwrap();
         let child = Command::new(&ch_bin)
             .arg("--api-socket")
             .arg(&self.socket_path)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(log_file.try_clone().unwrap())
+            .stderr(log_file)
             .spawn()
             .context("Failed to spawn Cloud Hypervisor")?;
             
@@ -197,8 +198,9 @@ impl Sandbox for CloudHypervisorSandbox {
                 initramfs: None,
             },
             cpus: CpusConfig {
-                boot_vcpus: 1,
-                max_vcpus: 1,
+                boot_vcpus: config.vcpus,
+                max_vcpus: config.vcpus,
+                kvm_hyperv: Some(true),
             },
             memory: MemoryConfig {
                 size: 512 * 1024 * 1024,

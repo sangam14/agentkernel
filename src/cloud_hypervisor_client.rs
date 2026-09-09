@@ -50,6 +50,8 @@ pub struct PayloadConfig {
 pub struct CpusConfig {
     pub boot_vcpus: u32,
     pub max_vcpus: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kvm_hyperv: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -104,6 +106,7 @@ impl Default for VmConfig {
             cpus: CpusConfig {
                 boot_vcpus: 1,
                 max_vcpus: 1,
+                kvm_hyperv: None,
             },
             memory: MemoryConfig {
                 size: 512 * 1024 * 1024, // 512 MB

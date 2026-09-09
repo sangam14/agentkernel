@@ -944,13 +944,8 @@ MOUNT_DIR="/mnt/rootfs"
 SIZE_MB={size_mb}
 PACKAGES="{packages}"
 
-echo "Creating ${{SIZE_MB}}MB ext4 image..."
-dd if=/dev/zero of="$ROOTFS_IMG" bs=1M count=$SIZE_MB 2>/dev/null
-mkfs.ext4 -F "$ROOTFS_IMG"
-
-echo "Mounting and populating rootfs..."
+echo "Populating rootfs directory..."
 mkdir -p "$MOUNT_DIR"
-mount -o loop "$ROOTFS_IMG" "$MOUNT_DIR"
 
 echo "Installing Alpine base system..."
 apk -X https://dl-cdn.alpinelinux.org/alpine/v3.24/main \
@@ -1007,7 +1002,9 @@ echo "agentkernel" > "$MOUNT_DIR/etc/hostname"
 echo "root:x:0:0:root:/root:/bin/sh" > "$MOUNT_DIR/etc/passwd"
 echo "root:x:0:" > "$MOUNT_DIR/etc/group"
 
-umount "$MOUNT_DIR"
+echo "Creating ext4 image from populated directory..."
+dd if=/dev/zero of="$ROOTFS_IMG" bs=1M count=$SIZE_MB 2>/dev/null
+mkfs.ext4 -d "$MOUNT_DIR" "$ROOTFS_IMG"
 
 # Fix ownership so Firecracker can access the file
 if [ -n "$HOST_UID" ] && [ -n "$HOST_GID" ]; then

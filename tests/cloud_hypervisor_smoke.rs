@@ -14,6 +14,11 @@ async fn test_cloud_hypervisor_binary_spawns() -> Result<()> {
         return Ok(());
     }
 
+    if !std::path::Path::new("/dev/kvm").exists() {
+        println!("KVM not available, skipping test");
+        return Ok(());
+    }
+
     let socket_path = std::path::PathBuf::from("/tmp/ch-api-ch-smoke-test.sock");
     let _ = std::fs::remove_file(&socket_path);
 
