@@ -95,6 +95,7 @@ pub const RUNTIMES: &[(&str, &str)] = &[
     ("node", "Node.js 20 LTS with npm (~256MB)"),
     ("go", "Go toolchain (~512MB)"),
     ("rust", "Rust with Cargo (~512MB)"),
+    ("k8s-node", "Liquid Metal Ubuntu Kubernetes node (~1.5GB)"),
 ];
 
 /// Setup configuration
@@ -684,6 +685,53 @@ pub async fn run_setup(non_interactive: bool) -> Result<()> {
 
 /// Build the kernel
 async fn build_kernel(data_dir: &Path) -> Result<()> {
+    let kernel_dir = data_dir.join("images/kernel");
+    std::fs::create_dir_all(&kernel_dir)?;
+
+    if std::env::consts::ARCH == "x86_64" {
+        println!("  Pulling pre-built kernel from liquidmetal-dev (GHCR)...");
+        let image = "ghcr.io/liquidmetal-dev/firecracker-kernel-bin:5.10.77";
+        
+        let status = Command::new("docker")
+            .args(["pull", image])
+            .status()
+            .context("Failed to pull kernel image")?;
+            
+        if !status.success() {
+            bail!("Failed to pull kernel image from GHCR");
+        }
+        
+        let container_name = "agentkernel-kernel-extract-tmp";
+        let _ = Command::new("docker").args(["rm", "-f", container_name]).output();
+        
+        let status = Command::new("docker")
+            .args(["create", "--name", container_name, image, "sh"])
+            .status()
+            .context("Failed to create container from kernel image")?;
+            
+        if !status.success() {
+            bail!("Failed to create temp container for kernel extraction");
+        }
+        
+        let vmlinux_path = kernel_dir.join(format!("vmlinux-{}-agentkernel", DEFAULT_KERNEL_VERSION));
+        
+        let status = Command::new("docker")
+            .args(["cp", &format!("{}:/boot/vmlinux", container_name), &vmlinux_path.to_string_lossy()])
+            .status()
+            .context("Failed to extract vmlinux from container")?;
+            
+        let _ = Command::new("docker").args(["rm", "-f", container_name]).output();
+        
+        if !status.success() {
+            bail!("Failed to extract vmlinux from container");
+        }
+        
+        println!("  Kernel successfully pulled and extracted!");
+        return Ok(());
+    }
+
+    println!("  Architecture is not x86_64, falling back to local source compilation...");
+
     // Find the build script in the source directory or use embedded version
     let script_content = include_str!("../images/build/build-kernel.sh");
     let config_content = include_str!("../images/kernel/microvm.config");
@@ -919,6 +967,7 @@ async fn build_rootfs(data_dir: &Path, runtime: &str) -> Result<()> {
         "base" => 64,
         "python" | "node" => 256,
         "go" | "rust" => 512,
+        "k8s-node" => 3072,
         _ => 256,
     };
 
@@ -931,7 +980,109 @@ async fn build_rootfs(data_dir: &Path, runtime: &str) -> Result<()> {
         _ => "",
     };
 
-    // Build script that runs inside Docker
+    // Create temp directory for build
+    let temp_dir = std::env::temp_dir().join("agentkernel-rootfs-build");
+    std::fs::create_dir_all(&temp_dir)?;
+
+    let mut extra_docker_args = vec![];
+    let build_script_core;
+
+    if runtime == "k8s-node" {
+        println!("  Pulling k8s-node OS image from liquidmetal-dev (GHCR)...");
+        let image = "ghcr.io/liquidmetal-dev/capmvm-k8s-ubuntu-22.04:1.30.14";
+        
+        let status = Command::new("docker")
+            .args(["pull", image])
+            .status()
+            .context("Failed to pull OS image")?;
+            
+        if !status.success() {
+            bail!("Failed to pull OS image from GHCR");
+        }
+        
+        let container_name = "agentkernel-k8s-extract-tmp";
+        let _ = Command::new("docker").args(["rm", "-f", container_name]).output();
+        
+        let status = Command::new("docker")
+            .args(["create", "--name", container_name, image])
+            .status()?;
+            
+        if !status.success() {
+            bail!("Failed to create temp container for OS extraction");
+        }
+            
+        let tar_path = temp_dir.join("rootfs.tar");
+        let status = Command::new("docker")
+            .args(["export", "-o", tar_path.to_str().unwrap(), container_name])
+            .status()?;
+            
+        let _ = Command::new("docker").args(["rm", "-f", container_name]).output();
+        
+        if !status.success() {
+            bail!("Failed to export OS filesystem");
+        }
+        
+        extra_docker_args.push("-v".to_string());
+        extra_docker_args.push(format!("{}:/rootfs.tar:ro", tar_path.display()));
+        
+        build_script_core = r#"
+echo "Extracting Liquid Metal k8s-node OS image..."
+tar -xf /rootfs.tar -C "$MOUNT_DIR" || true
+"#.to_string();
+
+    } else {
+        build_script_core = format!(r#"
+echo "Installing Alpine base system..."
+apk -X https://dl-cdn.alpinelinux.org/alpine/v3.24/main \
+    -X https://dl-cdn.alpinelinux.org/alpine/v3.24/community \
+    -U --allow-untrusted --root "$MOUNT_DIR" --initdb \
+    add alpine-base busybox-static $PACKAGES || true
+"#);
+    }
+
+    // Create init script
+    let init_script = if runtime == "k8s-node" {
+        r#"#!/bin/sh
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+hostname agentkernel
+
+# Start guest agent in background if available
+if [ -x /usr/bin/agent ]; then
+    /usr/bin/agent &
+    echo "Guest agent started"
+fi
+
+echo "Agentkernel guest ready, handing over to systemd..."
+exec /sbin/init
+"#
+    } else {
+        r#"#!/bin/busybox sh
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+/bin/busybox hostname agentkernel
+
+# Start guest agent in background if available
+if [ -x /usr/bin/agent ]; then
+    /usr/bin/agent &
+    AGENT_PID=$!
+    echo "Guest agent started"
+fi
+
+echo "Agentkernel guest ready"
+if [ $# -gt 0 ]; then
+    exec "$@"
+elif [ -n "$AGENT_PID" ]; then
+    wait $AGENT_PID
+else
+    exec /bin/busybox sh
+fi
+"#
+    };
+
     let build_script = format!(
         r#"#!/bin/sh
 set -eu
@@ -946,12 +1097,7 @@ PACKAGES="{packages}"
 
 echo "Populating rootfs directory..."
 mkdir -p "$MOUNT_DIR"
-
-echo "Installing Alpine base system..."
-apk -X https://dl-cdn.alpinelinux.org/alpine/v3.24/main \
-    -X https://dl-cdn.alpinelinux.org/alpine/v3.24/community \
-    -U --allow-untrusted --root "$MOUNT_DIR" --initdb \
-    add alpine-base busybox-static $PACKAGES || true
+{build_script_core}
 
 mkdir -p "$MOUNT_DIR"/{{dev,proc,sys,tmp,run,root,app,usr/bin}}
 chmod 1777 "$MOUNT_DIR/tmp"
@@ -973,27 +1119,7 @@ mknod -m 666 "$MOUNT_DIR/dev/urandom" c 1 9 || true
 
 # Create init script that starts the guest agent
 cat > "$MOUNT_DIR/init" << 'INIT'
-#!/bin/busybox sh
-/bin/busybox mount -t proc proc /proc
-/bin/busybox mount -t sysfs sysfs /sys
-/bin/busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-/bin/busybox hostname agentkernel
-
-# Start guest agent in background if available
-if [ -x /usr/bin/agent ]; then
-    /usr/bin/agent &
-    AGENT_PID=$!
-    echo "Guest agent started"
-fi
-
-echo "Agentkernel guest ready"
-if [ $# -gt 0 ]; then
-    exec "$@"
-elif [ -n "$AGENT_PID" ]; then
-    wait $AGENT_PID
-else
-    exec /bin/busybox sh
-fi
+{init_script}
 INIT
 chmod +x "$MOUNT_DIR/init"
 
@@ -1046,28 +1172,33 @@ ls -lh "$ROOTFS_IMG"
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|_| "1000".to_string());
 
-    let status = Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "--privileged",
-            "-e",
-            &format!("HOST_UID={}", uid),
-            "-e",
-            &format!("HOST_GID={}", gid),
-            // Security: Mount build script as read-only to prevent tampering
-            "-v",
-            &format!("{}:/output", rootfs_dir.display()),
-            "-v",
-            &format!("{}:/build.sh:ro", script_path.display()),
-            "-v",
-            &format!("{}:/agent-bin:ro", data_dir.join("bin").display()),
-            "alpine:3.24",
-            "/bin/sh",
-            "/build.sh",
-        ])
-        .status()
-        .context("Failed to run rootfs build")?;
+    let mut docker_cmd = Command::new("docker");
+    docker_cmd.args([
+        "run",
+        "--rm",
+        "--privileged",
+        "-e",
+        &format!("HOST_UID={}", uid),
+        "-e",
+        &format!("HOST_GID={}", gid),
+        // Security: Mount build script as read-only to prevent tampering
+        "-v",
+        &format!("{}:/output", rootfs_dir.display()),
+        "-v",
+        &format!("{}:/build.sh:ro", script_path.display()),
+        "-v",
+        &format!("{}:/agent-bin:ro", data_dir.join("bin").display()),
+    ]);
+    
+    docker_cmd.args(extra_docker_args);
+    
+    let status = docker_cmd.args([
+        "alpine:3.24",
+        "/bin/sh",
+        "/build.sh",
+    ])
+    .status()
+    .context("Failed to run rootfs build")?;
 
     if !status.success() {
         bail!("Rootfs build failed for {}", runtime);
