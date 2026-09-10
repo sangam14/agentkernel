@@ -514,13 +514,13 @@ pub fn prompt_multi_select(
 }
 
 /// Run the interactive setup
-pub async fn run_setup(non_interactive: bool) -> Result<()> {
+pub async fn run_setup(non_interactive: bool, runtimes: Option<Vec<String>>) -> Result<()> {
     println!("=== Agentkernel Setup ===\n");
 
     let status = check_installation();
     status.print();
 
-    if status.is_ready() && non_interactive {
+    if status.is_ready() && non_interactive && runtimes.is_none() {
         println!("\nAgentkernel is already set up and ready to use!");
         offer_plugin_install(non_interactive)?;
         return Ok(());
@@ -545,7 +545,9 @@ pub async fn run_setup(non_interactive: bool) -> Result<()> {
     let mut install_cloud_hypervisor = !status.cloud_hypervisor_installed;
     let mut runtimes_to_install: Vec<String> = Vec::new();
 
-    if non_interactive {
+    if let Some(r) = runtimes {
+        runtimes_to_install = r;
+    } else if non_interactive {
         // Non-interactive: install everything needed
         if !status.rootfs_base_installed {
             runtimes_to_install.push("base".to_string());

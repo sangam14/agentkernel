@@ -213,6 +213,9 @@ enum Commands {
         /// Run non-interactively with defaults
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Explicit runtimes to install
+        #[arg(long, value_delimiter = ',')]
+        runtimes: Option<Vec<String>>,
     },
     /// Initialize a new agentkernel.toml in the current directory
     Init {
@@ -992,8 +995,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Setup { yes } => {
-            run_setup(yes).await?;
+        Commands::Setup { yes, runtimes } => {
+            run_setup(yes, runtimes).await?;
         }
         Commands::Template { action } => match action {
             TemplateAction::List => {
